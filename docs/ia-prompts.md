@@ -1,0 +1,1 @@
+# Registo de uso de IA.
