@@ -3,4 +3,6 @@ estafeta
 gerador
 *.o
 *.log
-core
+corecentral
+tarifador
+central.pid
