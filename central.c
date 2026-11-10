@@ -1,47 +1,40 @@
-/* central.c - Passo 1: consola com os comandos stats e encerra */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>      /* pipe, fork, dup2, execl, close, access, unlink */
-#include <fcntl.h>       /* open */
-#include <signal.h>      /* sigaction */
-#include <sys/types.h>   /* pid_t */
-#include <sys/wait.h>    /* waitpid */
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <limits.h>
+#include <math.h>
 
 #include "config.h"
 #include "estruturas.h"
+#include "mensagens.h"
 
-/* Dados para falar com o tarifador */
 typedef struct {
-    pid_t pid;        /* número do processo tarifador */
-    int   fd_escrita; /* ponta por onde a central escreve (vai para o stdin dele) */
-    int   fd_leitura; /* ponta por onde a central lê (vem do stdout dele) */
+    pid_t pid;
+    int pipe_entrada;
+    int pipe_saida;
 } Tarifador;
 
-/* Flag que o handler do SIGINT põe a 1. É volatile sig_atomic_t porque
-   é alterada dentro de um handler e lida no programa principal */
-static volatile sig_atomic_t sinal_recebido = 0;
+ volatile sig_atomic_t sinal_recebido = 0;
 
-/* Handler do SIGINT (Ctrl+C): só levanta a flag. Nada de printf aqui,
-   porque não é seguro dentro de um handler */
-static void tratar_sigint(int sinal) {
-    (void) sinal;
+/* Handler do SIGINT: apenas assinala que a central deve terminar. */
+ void tratar_sigint(int sinal) {
+    (void)sinal;
     sinal_recebido = 1;
 }
 
-/* Handler do SIGPIPE: não faz nada. Serve só para o sinal deixar de matar
-   a central: o write devolve erro (EPIPE) e tratamo-lo no código. */
-static void tratar_sigpipe(int sinal) {
-    (void) sinal;
+/* Handler do SIGPIPE: impede que a central termine se o tarifador fechar o pipe. */
+ void tratar_sigpipe(int sinal) {
+    (void)sinal;
 }
 
-/* SIGINT -> handler. Sem SA_RESTART (flags = 0), por isso o sinal
-   interrompe o fgets e ele devolve NULL.
-   SIGPIPE -> handler vazio: se o tarifador morrer, o write devolve erro
-   em vez de matar a central. */
-static int configurar_sinais(void) {
+/* Configurar os sinais utilizados pela central. */
+ int configurar_sinais(void) {
     struct sigaction acao;
 
     memset(&acao, 0, sizeof(acao));
@@ -49,341 +42,366 @@ static int configurar_sinais(void) {
 
     acao.sa_handler = tratar_sigint;
     if (sigaction(SIGINT, &acao, NULL) == -1) {
-        perror("sigaction(SIGINT)");
+        perror("sigaction SIGINT");
         return -1;
     }
 
     acao.sa_handler = tratar_sigpipe;
     if (sigaction(SIGPIPE, &acao, NULL) == -1) {
-        perror("sigaction(SIGPIPE)");
+        perror("sigaction SIGPIPE");
         return -1;
     }
+
     return 0;
 }
 
-/* Mostra as estatísticas (const: só lê, não altera) */
-static void mostrar_stats(const Estatisticas *s) {
-    printf("Pedidos recebidos:  %d\n", s->recebidos);
-    printf("Pedidos atribuídos: %d\n", s->atribuidos);
-    printf("Pedidos concluídos: %d\n", s->concluidos);
-    printf("Pedidos expirados:  %d\n", s->expirados);
-    printf("Pedidos perdidos:   %d\n", s->perdidos);
-    printf("Valor total das entregas concluídas: %.2f euros\n", s->valor_total);
-}
-
-/* Converte texto num inteiro positivo. Devolve 0 se está bem, -1 se não */
-static int ler_inteiro(const char *texto, int *resultado) {
-    long valor;      /* long: cabe mais do que um int */
+/* Converte texto num inteiro positivo. */
+ int converter_inteiro(const char *texto, int *resultado) {
+    long valor;
     char lixo;
 
-    /* "%ld %c": lê um inteiro e tenta ler mais um caracter.
-       Se leu 2 coisas, havia lixo a seguir ao número (ex: "12abc") */
     if (sscanf(texto, "%ld %c", &valor, &lixo) != 1)
         return -1;
 
-    if (valor < 1 || valor > VALOR_MAXIMO)
+    if (valor < 1 || valor > INT_MAX)
         return -1;
 
-    *resultado = (int) valor;
+    *resultado = (int)valor;
     return 0;
 }
 
-/* Preenche a configuração: omissão -> variável de ambiente -> argumentos.
-   Devolve 0 se está bem, -1 se algum valor é inválido */
-static int carregar_config(ConfigCentral *cfg, int argc, char *argv[]) {
+/* Carregar configuração: valores por omissão, ambiente e argumentos. */
+ int carregar_config(ConfigCentral *config, int argc, char *argv[]) {
     char *valor;
-    int   i;
+    int i;
 
-    /* 1.º valores por omissão */
-    memset(cfg, 0, sizeof(*cfg));
-    cfg->max_estafetas   = MAXESTAFETAS_OMISSAO;
-    cfg->prazo_aceitacao = PRAZOACEITA_OMISSAO;
-    snprintf(cfg->bin_dir, sizeof(cfg->bin_dir), "%s", BINDIR_OMISSAO);
+    memset(config, 0, sizeof(*config));
 
-    /* 2.º variáveis de ambiente (getenv devolve NULL se não existir) */
-    valor = getenv(ENV_MAXESTAFETAS);
-    if (valor != NULL && ler_inteiro(valor, &cfg->max_estafetas) == -1) {
-        printf("Erro: %s inválido (%s)\n", ENV_MAXESTAFETAS, valor);
+    config->max_estafetas = MAX_ESTAFETAS_OMISSAO;
+    config->prazo_aceitacao = PRAZO_ACEITA_OMISSAO;
+    snprintf(config->bin_dir, sizeof(config->bin_dir), ".");
+
+    valor = getenv(ENV_MAX_ESTAFETAS);
+    if (valor != NULL && converter_inteiro(valor, &config->max_estafetas) == -1) {
+        printf("Erro: MAXESTAFETAS inválido (%s).\n", valor);
         return -1;
     }
 
-    valor = getenv(ENV_PRAZOACEITA);
-    if (valor != NULL && ler_inteiro(valor, &cfg->prazo_aceitacao) == -1) {
-        printf("Erro: %s inválido (%s)\n", ENV_PRAZOACEITA, valor);
+    valor = getenv(ENV_PRAZO_ACEITA);
+    if (valor != NULL && converter_inteiro(valor, &config->prazo_aceitacao) == -1) {
+        printf("Erro: PRAZOACEITA inválido (%s).\n", valor);
         return -1;
     }
 
     valor = getenv(ENV_BINDIR);
     if (valor != NULL) {
-        if (strlen(valor) >= sizeof(cfg->bin_dir)) {
-            printf("Erro: %s demasiado longo\n", ENV_BINDIR);
+        if (strlen(valor) >= sizeof(config->bin_dir)) {
+            printf("Erro: BINDIR demasiado longo.\n");
             return -1;
         }
-        strcpy(cfg->bin_dir, valor);
+        strcpy(config->bin_dir, valor);
     }
 
-    valor = getenv(ENV_CENTRAL_PIPE);    /* ainda não é usado, fica guardado */
-    if (valor != NULL && strlen(valor) < sizeof(cfg->central_pipe))
-        strcpy(cfg->central_pipe, valor);
+    valor = getenv(ENV_CENTRAL_PIPE);
+    if (valor != NULL) {
+        if (strlen(valor) >= sizeof(config->central_pipe)) {
+            printf("Erro: CENTRAL_PIPE demasiado longo.\n");
+            return -1;
+        }
+        strcpy(config->central_pipe, valor);
+    }
 
-    /* 3.º argumentos: vêm aos pares (-p 10, -m 5) e substituem o ambiente */
+    /* Os argumentos -m e -p substituem os valores do ambiente. */
     for (i = 1; i < argc; i += 2) {
         if (i + 1 >= argc) {
-            printf("Erro: falta o valor de %s\n", argv[i]);
+            printf("Erro: falta o valor do argumento %s.\n", argv[i]);
             return -1;
         }
 
-        if (strcmp(argv[i], "-p") == 0) {
-            if (ler_inteiro(argv[i + 1], &cfg->prazo_aceitacao) == -1) {
-                printf("Erro: valor inválido para -p (%s)\n", argv[i + 1]);
+        if (strcmp(argv[i], "-m") == 0) {
+            if (converter_inteiro(argv[i + 1], &config->max_estafetas) == -1) {
+                printf("Erro: valor inválido para -m (%s).\n", argv[i + 1]);
                 return -1;
             }
-        }
-        else if (strcmp(argv[i], "-m") == 0) {
-            if (ler_inteiro(argv[i + 1], &cfg->max_estafetas) == -1) {
-                printf("Erro: valor inválido para -m (%s)\n", argv[i + 1]);
+        } else if (strcmp(argv[i], "-p") == 0) {
+            if (converter_inteiro(argv[i + 1], &config->prazo_aceitacao) == -1) {
+                printf("Erro: valor inválido para -p (%s).\n", argv[i + 1]);
                 return -1;
             }
-        }
-        else {
-            printf("Erro: argumento desconhecido (%s)\n", argv[i]);
+        } else {
+            printf("Erro: argumento desconhecido (%s).\n", argv[i]);
             return -1;
         }
     }
 
-    /* o enunciado garante no máximo 20 estafetas */
-    if (cfg->max_estafetas > LIMITE_ESTAFETAS) {
-        printf("Erro: máximo de estafetas é %d\n", LIMITE_ESTAFETAS);
+    if (config->max_estafetas > MAX_ESTAFETAS) {
+        printf("Erro: máximo de estafetas é %d.\n", MAX_ESTAFETAS);
         return -1;
     }
 
     return 0;
 }
 
-/* Lança o tarifador com dois pipes:
-     p_ent: central escreve em p_ent[1]  ->  tarifador lê no stdin
-     p_sai: tarifador escreve no stdout  ->  central lê em p_sai[0]
-   Devolve 0 se está bem, -1 se falhou */
-static int iniciar_tarifador(Tarifador *t, const char *bin_dir) {
-    char caminho[TAM_CAMINHO];
-    int  p_ent[2];
-    int  p_sai[2];
+/* Verificar se já existe outra central em execução. */
+ int verificar_instancia_unica(void) {
+    int fd;
+    struct flock bloqueio;
 
-    /* caminho completo: BINDIR/tarifador */
-    if (snprintf(caminho, sizeof(caminho), "%s/%s", bin_dir, NOME_TARIFADOR)
-            >= (int) sizeof(caminho)) {
-        printf("Erro: caminho do tarifador demasiado longo\n");
+    fd = open("/tmp/entrega_so_central.lock", O_CREAT | O_RDWR, 0666);
+    if (fd == -1) {
+        perror("Erro ao abrir ficheiro de bloqueio");
         return -1;
     }
 
-    /* o ficheiro existe e pode ser executado? */
+    memset(&bloqueio, 0, sizeof(bloqueio));
+    bloqueio.l_type = F_WRLCK;
+    bloqueio.l_whence = SEEK_SET;
+
+    if (fcntl(fd, F_SETLK, &bloqueio) == -1) {
+        if (errno == EACCES || errno == EAGAIN)
+            printf("Erro: já existe uma central em execução.\n");
+        else
+            perror("Erro ao bloquear ficheiro");
+
+        close(fd);
+        return -1;
+    }
+
+    /* O descritor fica aberto até ao fim para manter o bloqueio. */
+    return fd;
+}
+
+/* Iniciar o tarifador através de dois pipes. */
+ int iniciar_tarifador(Tarifador *t, const char *bin_dir) {
+    char caminho[256];
+    int p_entrada[2];
+    int p_saida[2];
+
+    if (snprintf(caminho, sizeof(caminho), "%s/tarifador", bin_dir) >= (int)sizeof(caminho)) {
+        printf("Erro: caminho do tarifador demasiado longo.\n");
+        return -1;
+    }
+
     if (access(caminho, X_OK) == -1) {
         perror(caminho);
         return -1;
     }
 
-    if (pipe(p_ent) == -1) {
-        perror("pipe");
-        return -1;
-    }
-    if (pipe(p_sai) == -1) {
-        perror("pipe");
-        close(p_ent[0]);
-        close(p_ent[1]);
+    if (pipe(p_entrada) == -1) {
+        perror("pipe entrada");
         return -1;
     }
 
-    fflush(stdout);             /* evita texto repetido no filho */
-    t->pid = fork();            /* a partir daqui há 2 processos */
+    if (pipe(p_saida) == -1) {
+        perror("pipe saída");
+        close(p_entrada[0]);
+        close(p_entrada[1]);
+        return -1;
+    }
+
+    fflush(stdout);
+    t->pid = fork();
+
     if (t->pid == -1) {
         perror("fork");
-        close(p_ent[0]); close(p_ent[1]);
-        close(p_sai[0]); close(p_sai[1]);
+        close(p_entrada[0]);
+        close(p_entrada[1]);
+        close(p_saida[0]);
+        close(p_saida[1]);
         return -1;
     }
 
     if (t->pid == 0) {
-        /* ---- FILHO (vai passar a ser o tarifador) ---- */
-        /* stdin passa a ser a ponta de leitura do 1.º pipe,
-           stdout passa a ser a ponta de escrita do 2.º pipe */
-        dup2(p_ent[0], STDIN_FILENO);
-        dup2(p_sai[1], STDOUT_FILENO);
+        /* Processo filho: liga os pipes ao stdin e stdout do tarifador. */
+        close(p_entrada[1]);
+        close(p_saida[0]);
 
-        /* já não precisamos das pontas originais */
-        close(p_ent[0]); close(p_ent[1]);
-        close(p_sai[0]); close(p_sai[1]);
+        if (dup2(p_entrada[0], STDIN_FILENO) == -1) {
+            perror("dup2 stdin");
+            exit(1);
+        }
 
-        execl(caminho, NOME_TARIFADOR, (char *) NULL);
+        if (dup2(p_saida[1], STDOUT_FILENO) == -1) {
+            perror("dup2 stdout");
+            exit(1);
+        }
 
-        /* se chegou aqui o execl falhou */
+        close(p_entrada[0]);
+        close(p_saida[1]);
+
+        execl(caminho, "tarifador", (char *)NULL);
         perror("execl");
         exit(1);
     }
 
-    /* ---- PAI (central) ---- */
+    /* Processo pai: fecha as pontas utilizadas pelo filho. */
+    close(p_entrada[0]);
+    close(p_saida[1]);
 
-    /* fecha as pontas que são do filho */
-    close(p_ent[0]);
-    close(p_sai[1]);
+    t->pipe_entrada = p_entrada[1];
+    t->pipe_saida = p_saida[0];
 
-    t->fd_escrita = p_ent[1];
-    t->fd_leitura = p_sai[0];
+    printf("Tarifador iniciado (PID %d).\n", (int)t->pid);
     return 0;
 }
 
-/* Termina o tarifador: fechar o stdin dele faz com que acabe sozinho,
-   e o waitpid espera por ele (senão ficava zombie) */
-static void terminar_tarifador(Tarifador *t) {
-    close(t->fd_escrita);
-    close(t->fd_leitura);
-
-    while (waitpid(t->pid, NULL, 0) == -1) {
-        if (errno != EINTR) {       /* EINTR: interrompido por um sinal, repete */
-            perror("waitpid");
-            break;
-        }
-    }
-    printf("Tarifador terminado.\n");
-}
-
-/* Lê uma linha (até ao '\n') do pipe, um byte de cada vez, para não
-   ler mais do que a linha. Devolve 0 se está bem, -1 se falhou */
-static int ler_linha(int fd, char *buffer, size_t tamanho) {
-    size_t  i = 0;
+/* Lê uma linha do pipe do tarifador. */
+ int ler_linha(int fd, char *buffer, size_t tamanho) {
+    size_t i = 0;
+    char c;
     ssize_t n;
-    char    c;
 
     while (i < tamanho - 1) {
         n = read(fd, &c, 1);
-        if (n == -1 && errno == EINTR)   /* interrompido por um sinal: repete */
+
+        if (n == -1 && errno == EINTR)
             continue;
-        if (n != 1)                      /* erro ou fim de ficheiro */
+
+        if (n != 1)
             return -1;
+
         if (c == '\n') {
             buffer[i] = '\0';
             return 0;
         }
+
         buffer[i++] = c;
     }
-    return -1;                           /* linha demasiado grande */
+
+    buffer[i] = '\0';
+    return -1;
 }
 
-/* Pergunta o preço ao tarifador: escreve "origem destino peso" e lê
-   "distancia valor". Devolve 0 se está bem, -1 se falhou */
-static int tarifar_pedido(const Tarifador *t, const char *origem,
+/* Enviar um pedido ao tarifador e receber distância e valor. */
+ int tarifar_pedido(const Tarifador *t, const char *origem,
                           const char *destino, const char *peso,
                           float *distancia, float *valor) {
     char pergunta[100];
     char resposta[100];
-    int  n;
+    int n;
+    ssize_t escritos;
 
-    n = snprintf(pergunta, sizeof(pergunta), "%s %s %s\n",
-                 origem, destino, peso);
+    n = snprintf(pergunta, sizeof(pergunta), "%s %s %s\n",origem, destino, peso);
 
-    if (write(t->fd_escrita, pergunta, n) != n) {
-        perror("Erro ao escrever ao tarifador");
+    if (n < 0 || n >= (int)sizeof(pergunta)) {
+        printf("Erro: pedido demasiado longo.\n");
         return -1;
     }
 
-    if (ler_linha(t->fd_leitura, resposta, sizeof(resposta)) == -1) {
-        printf("Erro: o tarifador não respondeu\n");
+    escritos = write(t->pipe_entrada, pergunta, (size_t)n);
+    if (escritos != n) {
+        if (escritos == -1)
+            perror("Erro ao escrever ao tarifador");
+        else
+            printf("Erro: escrita incompleta no tarifador.\n");
+        return -1;
+    }
+
+    if (ler_linha(t->pipe_saida, resposta, sizeof(resposta)) == -1) {
+        printf("Erro: o tarifador não respondeu.\n");
         return -1;
     }
 
     if (sscanf(resposta, "%f %f", distancia, valor) != 2) {
-        printf("Erro: resposta inesperada do tarifador (%s)\n", resposta);
+        printf("Erro: resposta inesperada do tarifador (%s).\n", resposta);
         return -1;
     }
+
     return 0;
 }
 
-/* Instância única: a central cria o ficheiro FICHEIRO_PID com o seu PID.
-   Se o ficheiro já existe, assume que já há uma central em execução.
-   Devolve 0 se pode arrancar, -1 se já há outra central (ou erro) */
-static int verificar_instancia_unica(void) {
-    char    texto[32];
-    int     fd;
-    ssize_t n;
+/* Mostrar as estatísticas atuais. */
+ void mostrar_stats(const Estatisticas *stats) {
+    printf("\nStats\n");
+    printf("Pedidos recebidos:  %d\n", stats->pedidos_recebidos);
+    printf("Pedidos atribuidos: %d\n", stats->pedidos_atribuidos);
+    printf("Pedidos concluidos: %d\n", stats->pedidos_concluidos);
+    printf("Pedidos expirados:  %d\n", stats->pedidos_expirados);
+    printf("Pedidos perdidos:   %d\n", stats->pedidos_perdidos);
+    printf("Valor total das entregas concluídas: %.2f euros\n", stats->valor_total_entregas);
+}
 
-    /* O_EXCL: só cria se o ficheiro NÃO existir (falha se já existir) */
-    fd = open(FICHEIRO_PID, O_WRONLY | O_CREAT | O_EXCL, 0644);
-        if (fd == -1) {
-        printf("Erro: já existe uma central em execução\n");
-        return -1;
+/* Terminar o tarifador: fechar os pipes e esperar pelo processo filho. */
+ void terminar_tarifador(Tarifador *t) {
+    close(t->pipe_entrada);
+    close(t->pipe_saida);
+
+    while (waitpid(t->pid, NULL, 0) == -1) {
+        if (errno != EINTR) {
+            perror("waitpid");
+            break;
+        }
     }
 
-    /* escreve o nosso PID no ficheiro */
-    n = snprintf(texto, sizeof(texto), "%d\n", (int) getpid());
-    if (write(fd, texto, n) != n) {
-        perror(FICHEIRO_PID);
-        close(fd);
-        unlink(FICHEIRO_PID);
-        return -1;
-    }
-    close(fd);
-    return 0;
+    printf("Tarifador terminado.\n");
 }
 
 int main(int argc, char *argv[]) {
-
-    /* 1) Variáveis */
     ConfigCentral config;
     Tarifador tarifador;
     Estatisticas stats;
-    char linha[200];     /* linha escrita pelo administrador */
-    char p[5][64];       /* as palavras da linha: p[0] é o comando */
-    int  n;              /* quantas palavras foram lidas */
-    int  terminar = 0;   /* 1 = sair do ciclo */
+    char linha[200];
+    char p[5][64];
+    int n;
+    int terminar = 0;
+    int lock_fd;
 
-    /* 2) Sinais */
     if (configurar_sinais() == -1)
         return 1;
 
-    /* 3) Instância única (primeiro de tudo). Se falhar, NÃO se apaga
-          o ficheiro, porque pode ser da outra central */
-    if (verificar_instancia_unica() == -1)
+    if (carregar_config(&config, argc, argv) == -1)
         return 1;
 
-    /* 4) Parâmetros e contadores a zero */
-    if (carregar_config(&config, argc, argv) == -1) {
-        unlink(FICHEIRO_PID);        /* a partir daqui o ficheiro é nosso */
+    lock_fd = verificar_instancia_unica();
+    if (lock_fd == -1)
         return 1;
-    }
 
     memset(&stats, 0, sizeof(stats));
 
-    /* 5) Tarifador */
+    printf("Configuração da central:\n");
+    printf("Máximo de estafetas: %d\n", config.max_estafetas);
+    printf("Prazo: %d segundos\n", config.prazo_aceitacao);
+    printf("Diretório: %s\n\n", config.bin_dir);
+
     if (iniciar_tarifador(&tarifador, config.bin_dir) == -1) {
-        unlink(FICHEIRO_PID);
+        close(lock_fd);
         return 1;
     }
-    printf("Tarifador iniciado (PID %d)\n", (int) tarifador.pid);
 
-    printf("Central iniciada: max. estafetas=%d, prazo=%d s, bindir=%s\n",
-           config.max_estafetas, config.prazo_aceitacao, config.bin_dir);
-    printf("Comandos: pedido <origem> <destino> <peso>, estafetas, pedidos, stats,\n"
-           "          prazo <n>, encerra\n");
+    printf("Central em funcionamento.\n");
+    printf("Comandos disponíveis:\n");
+    printf("pedido <origem> <destino> <peso>\n");
+    printf("stats\n");
+    printf("encerra\n\n");
 
-    /* 6) Ciclo da consola (acaba com o encerra, Ctrl+D ou Ctrl+C) */
     while (!terminar && !sinal_recebido) {
         printf("> ");
-        fflush(stdout);              /* mostra o prompt já */
+        fflush(stdout);
 
-        /* lê uma linha inteira; NULL = fim de ficheiro (Ctrl+D)
-           ou interrompido pelo SIGINT */
-        if (fgets(linha, sizeof(linha), stdin) == NULL)
+        if (fgets(linha, sizeof(linha), stdin) == NULL) {
+            if (sinal_recebido)
+                clearerr(stdin);
             break;
+        }
 
-        /* separa a linha em palavras; n = quantas encontrou.
-           Lemos 5 (o pedido leva 4) para detetar palavras a mais */
+        /* Se não coube a linha toda, limpar o restante da entrada. */
+        if (strchr(linha, '\n') == NULL) {
+            int c;
+            while ((c = getchar()) != '\n' && c != EOF)
+                ;
+            printf("Erro: comando demasiado longo.\n");
+            continue;
+        }
+
+        /* Separar até cinco palavras para detetar argumentos a mais. */
         n = sscanf(linha, "%63s %63s %63s %63s %63s",
                    p[0], p[1], p[2], p[3], p[4]);
 
-        if (n < 1)                   /* linha vazia */
+        if (n < 1)
             continue;
 
         if (strcmp(p[0], "stats") == 0) {
-            if (n != 1)              /* stats não leva parâmetros: n tem de ser 1 */
+            if (n != 1)
                 printf("Uso: stats\n");
             else
                 mostrar_stats(&stats);
@@ -395,53 +413,37 @@ int main(int argc, char *argv[]) {
                 terminar = 1;
         }
         else if (strcmp(p[0], "pedido") == 0) {
-            float peso, distancia, valor;
-            char  lixo;
+            float peso;
+            float distancia;
+            float valor;
+            char lixo;
 
-            if (n != 4) {            /* pedido <origem> <destino> <peso> */
+            if (n != 4) {
                 printf("Uso: pedido <origem> <destino> <peso>\n");
             }
             else if (strlen(p[1]) >= TAM_LOCAL || strlen(p[2]) >= TAM_LOCAL) {
-                printf("Erro: origem e destino têm no máximo %d caracteres\n",
+                printf("Erro: origem e destino têm no máximo %d caracteres.\n",
                        TAM_LOCAL - 1);
             }
-            /* peso: número real entre 0 e VALOR_MAXIMO (isto também
-               rejeita "nan" e "inf") */
-            else if (sscanf(p[3], "%f %c", &peso, &lixo) != 1 ||
-                     !(peso > 0 && peso < VALOR_MAXIMO)) {
-                printf("Erro: peso inválido (%s)\n", p[3]);
-            }
             else {
-                stats.recebidos++;
+                errno = 0;
+                if (sscanf(p[3], "%f %c", &peso, &lixo) != 1 ||
+                    errno == ERANGE || !(peso > 0) || !isfinite(peso)) {
+                    printf("Erro: peso inválido (%s).\n", p[3]);
+                    continue;
+                }
+		
+		if (stats.pedidos_recebidos >= MAX_PEDIDOS) {
+    		printf("Erro: limite máximo de pedidos atingido.\n");
+    		continue;
+		}
+                stats.pedidos_recebidos++;
+
                 if (tarifar_pedido(&tarifador, p[1], p[2], p[3],
-                                   &distancia, &valor) == 0)
+                                   &distancia, &valor) == 0) {
                     printf("Pedido %s -> %s (%s kg): %.2f km, %.2f euros\n",
                            p[1], p[2], p[3], distancia, valor);
-            }
-        }
-        else if (strcmp(p[0], "estafetas") == 0) {
-            if (n != 1)
-                printf("Uso: estafetas\n");
-            else
-                printf("Não há estafetas ligados.\n");   /* ainda não existem */
-        }
-        else if (strcmp(p[0], "pedidos") == 0) {
-            if (n != 1)
-                printf("Uso: pedidos\n");
-            else
-                printf("Não há pedidos por atribuir nem em curso.\n");
-        }
-        else if (strcmp(p[0], "prazo") == 0) {
-            int novo_prazo;
-
-            /* prazo <n>: duas palavras e n inteiro positivo (a mesma
-               função que valida o -p) */
-            if (n != 2 || ler_inteiro(p[1], &novo_prazo) == -1) {
-                printf("Uso: prazo <segundos>\n");
-            }
-            else {
-                config.prazo_aceitacao = novo_prazo;
-                printf("Prazo de aceitação passou a %d segundos\n", novo_prazo);
+                }
             }
         }
         else {
@@ -449,12 +451,13 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* 7) Fim: é igual para o encerra, o Ctrl+D e o Ctrl+C */
     if (sinal_recebido)
         printf("\nSIGINT recebido.\n");
+
     printf("A encerrar a central...\n");
     terminar_tarifador(&tarifador);
-    unlink(FICHEIRO_PID);            /* apaga o ficheiro de PID */
+    close(lock_fd);
     printf("Central encerrada.\n");
+
     return 0;
 }

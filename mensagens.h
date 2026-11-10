@@ -1,61 +1,82 @@
+
 #ifndef MENSAGENS_H
 #define MENSAGENS_H
 
+#include <sys/types.h>
 #include "config.h"
 
-/* Todas as mensagens começam por char tipo[TAM_TIPO]. Quem lê o pipe lê
-   primeiro esse campo e, conforme o valor, sabe o que vem a seguir.
-   Todas as estruturas são muito menores que PIPE_BUF (4096 bytes), por
-   isso cada write() num pipe é atómico. */
+/* Identificadores dos tipos de mensagem */
+#define TIPO_PEDIDO "pedido"
+#define TIPO_REGISTO "RegistoEst"
+#define TIPO_ACEITA "Aceita"
+#define TIPO_ENTREGUE "Entregue"
+#define TIPO_ESTADO "Estado"
+#define TIPO_GANHOS "Ganhos"
+#define TIPO_SAI "Sai"
+#define TIPO_ANUNCIO "Anuncio"
+#define TIPO_RESPOSTA "Resposta"
+#define TIPO_ENCERRA "Encerra"
 
-/* Valores do campo tipo */
-#define TIPO_PEDIDO     "pedido"      /* gerador  -> central */
-#define TIPO_REGISTO    "RegistoEst"  /* estafeta -> central */
-#define TIPO_ACEITA     "Aceita"      /* estafeta -> central */
-#define TIPO_ENTREGUE   "Entregue"    /* estafeta -> central */
-#define TIPO_ESTADO     "Estado"      /* estafeta -> central */
-#define TIPO_GANHOS     "Ganhos"      /* estafeta -> central */
-#define TIPO_SAI        "Sai"         /* estafeta -> central */
-#define TIPO_ANUNCIO    "Anuncio"     /* central  -> estafeta */
-#define TIPO_ENCERRA    "Encerra"     /* central  -> estafeta */
-
-/* gerador -> central */
+/* Mensagem enviada pelo gerador à central */
 typedef struct {
     char tipo[TAM_TIPO];
-    char corpo[TAM_CORPO];            /* "<id> <origem> <destino> <peso>" */
+    char corpo[TAM_CORPO];
 } MsgPedido;
 
-/* estafeta -> central (pelo CENTRAL_PIPE) */
+/* Registo inicial de um estafeta */
 typedef struct {
     char tipo[TAM_TIPO];
     char username[TAM_USERNAME];
-    char pipe_para_central[TAM_PIPE];   /* estafeta -> central */
-    char pipe_para_estafeta[TAM_PIPE];  /* central -> estafeta */
+    pid_t pid;
+    char pipe_para_central[TAM_PIPE];
+    char pipe_para_estafeta[TAM_PIPE];
 } MsgRegistoEst;
 
-/* estafeta -> central */
+/* Tentativa de aceitar um pedido */
 typedef struct {
     char tipo[TAM_TIPO];
-    int  id_pedido;
+    int id_pedido;
 } MsgAceita;
 
-/* estafeta -> central: Entregue, Estado, Ganhos e Sai (só o tipo) */
+/* Comando entregue */
 typedef struct {
     char tipo[TAM_TIPO];
-} MsgComando;
+} MsgEntregue;
 
-/* central -> estafeta */
+/* Consulta do estado */
 typedef struct {
-    char  tipo[TAM_TIPO];
-    int   id;
-    char  origem[TAM_LOCAL];
-    char  destino[TAM_LOCAL];
+    char tipo[TAM_TIPO];
+} MsgEstado;
+
+/* Consulta dos ganhos */
+typedef struct {
+    char tipo[TAM_TIPO];
+} MsgGanhos;
+
+/* Saída do estafeta */
+typedef struct {
+    char tipo[TAM_TIPO];
+} MsgSai;
+
+/* Anúncio enviado pela central ao estafeta */
+typedef struct {
+    char tipo[TAM_TIPO];
+    int id;
+    char origem[TAM_LOCAL];
+    char destino[TAM_LOCAL];
     float peso;
     float valor;
-    int   segundos_restantes;
+    int segundos_restantes;
 } MsgAnuncio;
 
-/* central -> estafeta */
+/* Resposta enviada pela central */
+typedef struct {
+    char tipo[TAM_TIPO];
+    int sucesso;
+    char mensagem[100];
+} MsgResposta;
+
+/* Encerramento enviado pela central */
 typedef struct {
     char tipo[TAM_TIPO];
 } MsgEncerra;

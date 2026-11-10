@@ -1,30 +1,32 @@
+
 #ifndef ESTRUTURAS_H
 #define ESTRUTURAS_H
 
 #include "config.h"
 
-/* Definições de funcionamento da central */
+/* Configuração da central */
 typedef struct {
-    int  max_estafetas;             /* MAXESTAFETAS ou -m */
-    int  prazo_aceitacao;           /* PRAZOACEITA  ou -p (segundos) */
-    char bin_dir[TAM_CAMINHO];      /* BINDIR: onde está o tarifador */
-    char central_pipe[TAM_PIPE];    /* CENTRAL_PIPE (só usado na fase final) */
+    int max_estafetas;
+    int prazo_aceitacao;
+    char central_pipe[TAM_PIPE];
+    char bin_dir[TAM_CAMINHO];
 } ConfigCentral;
 
-/* Definições de funcionamento do estafeta */
+/* Configuração do estafeta */
 typedef struct {
-    char username[TAM_USERNAME];    /* argumento da linha de comandos */
-    char central_pipe[TAM_PIPE];    /* CENTRAL_PIPE */
+    char username[TAM_USERNAME];
+    char central_pipe[TAM_PIPE];
 } ConfigEstafeta;
 
-/* Estatísticas desde o arranque da central (comando stats) */
+/* Estatísticas gerais da central */
 typedef struct {
-    int   recebidos;
-    int   atribuidos;
-    int   concluidos;
-    int   expirados;
-    int   perdidos;
-    float valor_total;              /* soma das entregas concluídas */
+    int pedidos_recebidos;
+    int pedidos_atribuidos;
+    int pedidos_concluidos;
+    int pedidos_expirados;
+    int pedidos_perdidos;
+
+    float valor_total_entregas;
 } Estatisticas;
 
 #endif
