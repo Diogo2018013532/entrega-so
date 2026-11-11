@@ -364,6 +364,7 @@ int main(int argc, char *argv[]) {
     printf("Diretório: %s\n\n", config.bin_dir);
 
     if (iniciar_tarifador(&tarifador, config.bin_dir) == -1) {
+        unlink("/tmp/entrega_so_central.lock");
         close(lock_fd);
         return 1;
     }
@@ -456,6 +457,7 @@ int main(int argc, char *argv[]) {
 
     printf("A encerrar a central...\n");
     terminar_tarifador(&tarifador);
+    unlink("/tmp/entrega_so_central.lock");
     close(lock_fd);
     printf("Central encerrada.\n");
 
